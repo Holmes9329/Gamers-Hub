@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BEACON RUN</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #000;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Courier New', Courier, monospace;
+    overflow: hidden;
+  }
+  #wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  canvas {
+    background: #000;
+    border: 2px solid #fff;
+    width: min(96vw, 800px);
+    height: auto;
+    aspect-ratio: 800 / 448;
+    image-rendering: pixelated;
+  }
+  #hint { color: #fff; font-size: 12px; letter-spacing: 1px; opacity: 0.6; text-align: center; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="800" height="448"></canvas>
+  <div id="hint">&larr; &rarr; OR A/D TO RUN &mdash; UP / SPACE / W TO JUMP</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var W = canvas.width, H = canvas.height;
+
+  var TILE = 32;
+  var ROWS = 14;
+  var GROUND_ROW = 11; // rows GROUND_ROW..ROWS-1 are solid ground unless in a gap
+
+  // ---------------------------------------------------------------
+  // High score
+  // ---------------------------------------------------------------
+  var HIGH_SCORE_KEY = "beaconRunHighScore";
+  var highScore = 0;
+  try { highScore = parseInt(localStorage.getItem(HIGH_SCORE_KEY), 10) || 0; } catch (e) { highScore = 0; }
+  function saveHighScore(s) {
+    if (s > highScore) {
+      highScore = s;
+      try { localStorage.setItem(HIGH_SCORE_KEY, String(highScore)); } catch (e) { /* ignore */ }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Level data -- an original story/setting, no borrowed characters.
+  // BIT is a small spark-robot relighting three dark Beacons across
+  // the Grid before the Glitch consumes it.
+  // ---------------------------------------------------------------
+  function shardsFrom(list) {
+    // list entries: [col, standingRowTop]
+    return list.map(function (e) {
+      return { col: e[0], row: e[1], collected: false };
+    });
+  }
+  function enemiesFrom(list) {
+    // list entries: [minCol, maxCol, standingRowTop]
+    return list.map(function (e) {
+      return { minCol: e[0], maxCol: e[1], row: e[2] };
+    });
+  }
+
+  var LEVELS = [
+    {
+      title: "SECTOR 1 // OUTSKIRTS",
+      widthTiles: 40,
+      gaps: [[10, 11], [22, 23], [33, 34]],
+      platforms: [{ col: 14, len: 2, row: 8 }],
+      shards: shardsFrom([
+        [3, GROUND_ROW], [7, GROUND_ROW], [14, 8], [15, 8],
+        [17, GROUND_ROW], [21, GROUND_ROW], [27, GROUND_ROW], [31, GROUND_ROW]
+      ]),
+      enemies: enemiesFrom([
+        [4, 8, GROUND_ROW], [26, 30, GROUND_ROW]
+      ]),
+      goalCol: 38,
+      story: [
+        "THE GRID'S THREE BEACONS HAVE GONE DARK.",
+        "A GLITCH SWEPT THROUGH AND SILENCED THEM.",
+        "BIT MUST CROSS THE OUTSKIRTS AND RELIGHT THE FIRST ONE."
+      ]
+    },
+    {
+      title: "SECTOR 2 // STATIC FIELDS",
+      widthTiles: 55,
+      gaps: [[8, 9], [19, 20], [30, 31], [41, 42]],
+      platforms: [{ col: 24, len: 2, row: 8 }],
+      shards: shardsFrom([
+        [3, GROUND_ROW], [6, GROUND_ROW], [12, GROUND_ROW], [15, GROUND_ROW],
+        [18, GROUND_ROW], [24, 8], [25, 8], [27, GROUND_ROW],
+        [34, GROUND_ROW], [37, GROUND_ROW], [44, GROUND_ROW], [47, GROUND_ROW], [51, GROUND_ROW]
+      ]),
+      enemies: enemiesFrom([
+        [3, 7, GROUND_ROW], [12, 16, GROUND_ROW], [23, 27, GROUND_ROW],
+        [34, 38, GROUND_ROW], [44, 48, GROUND_ROW]
+      ]),
+      goalCol: 51,
+      story: [
+        "SECTOR ONE SECURED -- ONE BEACON BURNS AGAIN.",
+        "THE STATIC GROWS STRONGER AHEAD..."
+      ]
+    },
+    {
+      title: "SECTOR 3 // THE CORE",
+      widthTiles: 73,
+      gaps: [[10, 11], [21, 22], [32, 33], [43, 44], [54, 55], [65, 66]],
+      platforms: [{ col: 34, len: 2, row: 8 }, { col: 56, len: 2, row: 8 }],
+      shards: shardsFrom([
+        [2, GROUND_ROW], [8, GROUND_ROW], [13, GROUND_ROW], [19, GROUND_ROW],
+        [24, GROUND_ROW], [30, GROUND_ROW], [34, 8], [35, 8],
+        [41, GROUND_ROW], [46, GROUND_ROW], [52, GROUND_ROW],
+        [56, 8], [57, 8], [63, GROUND_ROW], [68, GROUND_ROW]
+      ]),
+      enemies: enemiesFrom([
+        [4, 6, GROUND_ROW], [15, 17, GROUND_ROW], [26, 28, GROUND_ROW],
+        [37, 39, GROUND_ROW], [48, 50, GROUND_ROW], [59, 61, GROUND_ROW]
+      ]),
+      goalCol: 70,
+      story: [
+        "TWO BEACONS BURN AGAIN.",
+        "THE LAST ONE WAITS DEEP IN THE CORE."
+      ]
+    }
+  ];
+
+  var ENDING_TEXT = [
+    "THE LAST BEACON FLARES TO LIFE.",
+    "THE GRID IS SAFE...",
+    "...FOR NOW."
+  ];
+
+  // ---------------------------------------------------------------
+  // Physics constants
+  // ---------------------------------------------------------------
+  var GRAVITY = 1800;
+  var MOVE_SPEED = 220;
+  var JUMP_VELOCITY = -620;
+  var COYOTE_TIME = 0.1;
+
+  // ---------------------------------------------------------------
+  // Runtime state
+  // ---------------------------------------------------------------
+  var STATE_TITLE = "title", STATE_STORY = "story", STATE_PLAYING = "playing",
+      STATE_GAMEOVER = "gameover", STATE_WIN = "win";
+  var state = STATE_TITLE;
+
+  var LIVES_MAX = 3;
+  var lives = LIVES_MAX;
+  var score = 0;
+  var levelIndex = 0;
+  var storyLines = [];
+  var pendingEnding = false;
+
+  var solidGrid = [];
+  var levelWidthPx = 0;
+  var camera = { x: 0 };
+
+  var player = {
+    w: 22, h: 28, x: 0, y: 0, vx: 0, vy: 0,
+    grounded: false, coyote: 0, facing: 1, hurtFlash: 0
+  };
+
+  var enemies = [];
+  var shards = [];
+  var particles = [];
+
+  var keys = { left: false, right: false };
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function spawnParticles(x, y, count) {
+    for (var i = 0; i < count; i++) {
+      var ang = Math.random() * Math.PI * 2;
+      var spd = rand(40, 160);
+      particles.push({ x: x, y: y, vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd, life: 0.45, maxLife: 0.45 });
+    }
+  }
+  function updateParticles(dt) {
+    for (var i = particles.length - 1; i >= 0; i--) {
+      var p = particles[i];
+      p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Level loading
+  // ---------------------------------------------------------------
+  function isGapCol(level, col) {
+    for (var i = 0; i < level.gaps.length; i++) {
+      if (col >= level.gaps[i][0] && col <= level.gaps[i][1]) return true;
+    }
+    return false;
+  }
+
+  function buildSolidGrid(level) {
+    var cols = level.widthTiles;
+    var grid = [];
+    for (var r = 0; r < ROWS; r++) grid.push(new Array(cols).fill(false));
+    for (var c = 0; c < cols; c++) {
+      if (isGapCol(level, c)) continue;
+      for (r = GROUND_ROW; r < ROWS; r++) grid[r][c] = true;
+    }
+    for (var pi = 0; pi < level.platforms.length; pi++) {
+      var plat = level.platforms[pi];
+      for (var k = 0; k < plat.len; k++) grid[plat.row][plat.col + k] = true;
+    }
+    return grid;
+  }
+
+  function isSolidTile(col, row) {
+    if (row < 0 || row >= ROWS || col < 0 || col >= solidGrid[0].length) return false;
+    return solidGrid[row][col];
+  }
+
+  function loadLevel(idx) {
+    levelIndex = idx;
+    var level = LEVELS[idx];
+    solidGrid = buildSolidGrid(level);
+    levelWidthPx = level.widthTiles * TILE;
+
+    player.x = 1 * TILE + (TILE - player.w) / 2;
+    player.y = GROUND_ROW * TILE - player.h;
+    player.vx = 0; player.vy = 0; player.grounded = false; player.coyote = 0;
+    player.hurtFlash = 0;
+
+    enemies = level.enemies.map(function (e) {
+      var minX = e.minCol * TILE, maxX = e.maxCol * TILE;
+      return {
+        minX: minX, maxX: maxX,
+        x: minX, y: e.row * TILE - 24,
+        w: 24, h: 22, dir: 1, speed: 55
+      };
+    });
+
+    shards = level.shards.map(function (s) {
+      return { x: s.col * TILE + TILE / 2, y: s.row * TILE - TILE * 0.55, collected: false };
+    });
+
+    camera.x = 0;
+    particles.length = 0;
+  }
+
+  function respawnInLevel() {
+    loadLevel(levelIndex);
+  }
+
+  function beginGame() {
+    score = 0;
+    lives = LIVES_MAX;
+    loadLevel(0);
+    storyLines = LEVELS[0].story;
+    pendingEnding = false;
+    state = STATE_STORY;
+  }
+
+  function advanceFromStory() {
+    if (pendingEnding) {
+      state = STATE_WIN;
+      saveHighScore(score);
+      return;
+    }
+    state = STATE_PLAYING;
+  }
+
+  function onLevelCleared() {
+    score += 100;
+    if (levelIndex >= LEVELS.length - 1) {
+      storyLines = ENDING_TEXT;
+      pendingEnding = true;
+      state = STATE_STORY;
+    } else {
+      loadLevel(levelIndex + 1);
+      storyLines = LEVELS[levelIndex].story;
+      state = STATE_STORY;
+    }
+  }
+
+  function onPlayerDeath() {
+    lives -= 1;
+    spawnParticles(player.x + player.w / 2, player.y + player.h / 2, 16);
+    if (lives <= 0) {
+      state = STATE_GAMEOVER;
+      saveHighScore(score);
+    } else {
+      respawnInLevel();
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Input
+  // ---------------------------------------------------------------
+  function isJumpCode(code) { return code === "ArrowUp" || code === "Space" || code === "KeyW"; }
+  function isGameKey(code) {
+    return code === "ArrowLeft" || code === "ArrowRight" || code === "KeyA" || code === "KeyD" || isJumpCode(code);
+  }
+
+  window.addEventListener("keydown", function (e) {
+    if (isGameKey(e.code)) e.preventDefault();
+
+    if (state === STATE_TITLE) { beginGame(); return; }
+    if (state === STATE_GAMEOVER) { beginGame(); return; }
+    if (state === STATE_STORY) { if (!e.repeat) advanceFromStory(); return; }
+    if (state === STATE_WIN) { state = STATE_TITLE; return; }
+
+    if (state !== STATE_PLAYING) return;
+    if (e.code === "ArrowLeft" || e.code === "KeyA") keys.left = true;
+    if (e.code === "ArrowRight" || e.code === "KeyD") keys.right = true;
+    if (isJumpCode(e.code) && !e.repeat) {
+      if (player.coyote > 0) {
+        player.vy = JUMP_VELOCITY;
+        player.coyote = 0;
+      }
+    }
+  });
+
+  window.addEventListener("keyup", function (e) {
+    if (e.code === "ArrowLeft" || e.code === "KeyA") keys.left = false;
+    if (e.code === "ArrowRight" || e.code === "KeyD") keys.right = false;
+    // No jump-height cut on release: a quick tap always gets the full,
+    // predictable jump arc the levels are designed around.
+  });
+
+  canvas.addEventListener("mousedown", function () {
+    if (state === STATE_TITLE) { beginGame(); return; }
+    if (state === STATE_GAMEOVER) { beginGame(); return; }
+    if (state === STATE_STORY) { advanceFromStory(); return; }
+    if (state === STATE_WIN) { state = STATE_TITLE; return; }
+  });
+
+  // ---------------------------------------------------------------
+  // Collision helpers
+  // ---------------------------------------------------------------
+  function rectVsSolid(x, y, w, h) {
+    var c0 = Math.floor(x / TILE), c1 = Math.floor((x + w - 1) / TILE);
+    var r0 = Math.floor(y / TILE), r1 = Math.floor((y + h - 1) / TILE);
+    for (var r = r0; r <= r1; r++) {
+      for (var c = c0; c <= c1; c++) {
+        if (isSolidTile(c, r)) return true;
+      }
+    }
+    return false;
+  }
+
+  function moveAndCollide(dt) {
+    // horizontal
+    var newX = player.x + player.vx * dt;
+    newX = clamp(newX, 0, levelWidthPx - player.w);
+    if (rectVsSolid(newX, player.y, player.w, player.h)) {
+      if (player.vx > 0) {
+        newX = Math.floor((player.x + player.w) / TILE) * TILE - player.w;
+      } else if (player.vx < 0) {
+        newX = Math.ceil(player.x / TILE) * TILE;
+      }
+      player.vx = 0;
+    }
+    player.x = newX;
+
+    // vertical
+    var newY = player.y + player.vy * dt;
+    var landed = false;
+    if (rectVsSolid(player.x, newY, player.w, player.h)) {
+      if (player.vy > 0) {
+        newY = Math.floor((player.y + player.h) / TILE) * TILE - player.h;
+        landed = true;
+      } else if (player.vy < 0) {
+        newY = Math.ceil(player.y / TILE) * TILE;
+      }
+      player.vy = 0;
+    }
+    player.y = newY;
+    player.grounded = landed;
+  }
+
+  // ---------------------------------------------------------------
+  // Update
+  // ---------------------------------------------------------------
+  function update(dt) {
+    updateParticles(dt);
+    if (state !== STATE_PLAYING) return;
+
+    if (keys.left && !keys.right) { player.vx = -MOVE_SPEED; player.facing = -1; }
+    else if (keys.right && !keys.left) { player.vx = MOVE_SPEED; player.facing = 1; }
+    else { player.vx = 0; }
+
+    player.vy += GRAVITY * dt;
+    if (player.vy > 1400) player.vy = 1400;
+
+    moveAndCollide(dt);
+
+    if (player.grounded) player.coyote = COYOTE_TIME;
+    else player.coyote = Math.max(0, player.coyote - dt);
+
+    if (player.hurtFlash > 0) player.hurtFlash -= dt;
+
+    // fell into a pit / off the bottom
+    if (player.y > H + 40) { onPlayerDeath(); return; }
+
+    // enemies
+    for (var i = 0; i < enemies.length; i++) {
+      var en = enemies[i];
+      en.x += en.dir * en.speed * dt;
+      if (en.x < en.minX) { en.x = en.minX; en.dir = 1; }
+      if (en.x + en.w > en.maxX) { en.x = en.maxX - en.w; en.dir = -1; }
+    }
+    for (i = enemies.length - 1; i >= 0; i--) {
+      en = enemies[i];
+      var overlap = player.x < en.x + en.w && player.x + player.w > en.x &&
+                    player.y < en.y + en.h && player.y + player.h > en.y;
+      if (!overlap) continue;
+      var playerBottom = player.y + player.h;
+      if (player.vy > 0 && playerBottom - en.y < 14) {
+        // stomp
+        spawnParticles(en.x + en.w / 2, en.y + en.h / 2, 12);
+        enemies.splice(i, 1);
+        score += 25;
+        player.vy = JUMP_VELOCITY * 0.55;
+      } else {
+        onPlayerDeath();
+        return;
+      }
+    }
+
+    // shards
+    for (i = shards.length - 1; i >= 0; i--) {
+      var s = shards[i];
+      if (s.collected) continue;
+      var dx = (player.x + player.w / 2) - s.x, dy = (player.y + player.h / 2) - s.y;
+      if (dx * dx + dy * dy < 20 * 20) {
+        s.collected = true;
+        score += 10;
+        spawnParticles(s.x, s.y, 8);
+        shards.splice(i, 1);
+      }
+    }
+
+    // goal
+    var goalX = LEVELS[levelIndex].goalCol * TILE;
+    if (player.x + player.w / 2 > goalX && player.x + player.w / 2 < goalX + TILE) {
+      onLevelCleared();
+      return;
+    }
+
+    // camera
+    camera.x = clamp(player.x + player.w / 2 - W / 2, 0, Math.max(0, levelWidthPx - W));
+  }
+
+  // ---------------------------------------------------------------
+  // Draw
+  // ---------------------------------------------------------------
+  function drawGrid(t) {
+    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    ctx.lineWidth = 1;
+    var parallax = camera.x * 0.4;
+    var spacing = 64;
+    var offset = (-parallax) % spacing;
+    for (var x = offset; x < W; x += spacing) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+    for (var y = 0; y < H; y += spacing) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+  }
+
+  function drawWorld() {
+    var cols = solidGrid[0].length;
+    var c0 = Math.max(0, Math.floor(camera.x / TILE) - 1);
+    var c1 = Math.min(cols - 1, Math.ceil((camera.x + W) / TILE) + 1);
+
+    ctx.fillStyle = "#fff";
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = c0; c <= c1; c++) {
+        if (!solidGrid[r][c]) continue;
+        var sx = c * TILE - camera.x;
+        var sy = r * TILE;
+        ctx.fillRect(sx, sy, TILE + 1, TILE + 1);
+      }
+    }
+
+    // goal beacon
+    var level = LEVELS[levelIndex];
+    var gx = level.goalCol * TILE + TILE / 2 - camera.x;
+    var poleTopY = (GROUND_ROW - 4) * TILE;
+    var poleBottomY = GROUND_ROW * TILE;
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(gx, poleBottomY); ctx.lineTo(gx, poleTopY); ctx.stroke();
+    var pulse = 5 + 2 * Math.sin(performance.now() / 180);
+    ctx.beginPath(); ctx.arc(gx, poleTopY, pulse, 0, Math.PI * 2);
+    ctx.fillStyle = "#fff"; ctx.fill();
+
+    // shards
+    for (var si = 0; si < shards.length; si++) {
+      var s = shards[si];
+      var sxp = s.x - camera.x;
+      if (sxp < -20 || sxp > W + 20) continue;
+      ctx.save();
+      ctx.translate(sxp, s.y);
+      ctx.rotate(performance.now() / 500);
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -8); ctx.lineTo(6, 0); ctx.lineTo(0, 8); ctx.lineTo(-6, 0); ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // enemies
+    for (var ei = 0; ei < enemies.length; ei++) {
+      var en = enemies[ei];
+      var exp = en.x - camera.x;
+      if (exp < -30 || exp > W + 30) continue;
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(exp, en.y + en.h);
+      ctx.lineTo(exp + en.w * 0.2, en.y);
+      ctx.lineTo(exp + en.w * 0.5, en.y + en.h * 0.35);
+      ctx.lineTo(exp + en.w * 0.8, en.y);
+      ctx.lineTo(exp + en.w, en.y + en.h);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(exp + en.w * 0.35, en.y + en.h * 0.55, 1.6, 0, Math.PI * 2);
+      ctx.arc(exp + en.w * 0.65, en.y + en.h * 0.55, 1.6, 0, Math.PI * 2);
+      ctx.fillStyle = "#fff"; ctx.fill();
+    }
+
+    // particles
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5;
+    for (var pi = 0; pi < particles.length; pi++) {
+      var p = particles[pi];
+      ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+      var pxp = p.x - camera.x;
+      ctx.beginPath();
+      ctx.moveTo(pxp, p.y);
+      ctx.lineTo(pxp - p.vx * 0.03, p.y - p.vy * 0.03);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // player (BIT)
+    var blink = player.hurtFlash > 0 && Math.floor(player.hurtFlash * 14) % 2 === 0;
+    if (!blink) {
+      var pxp2 = player.x - camera.x;
+      ctx.save();
+      ctx.translate(pxp2 + player.w / 2, player.y + player.h / 2);
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+      ctx.strokeRect(-player.w / 2, -player.h / 2, player.w, player.h);
+      ctx.beginPath();
+      ctx.arc(player.facing * 3, -4, 2, 0, Math.PI * 2);
+      ctx.fillStyle = "#fff"; ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawHUD() {
+    ctx.fillStyle = "#fff";
+    ctx.font = "16px 'Courier New', monospace";
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText("SCORE " + score, 10, 10);
+    ctx.textAlign = "right";
+    ctx.fillText("BEST " + Math.max(highScore, score), W - 10, 10);
+
+    ctx.textAlign = "left";
+    ctx.font = "12px 'Courier New', monospace";
+    ctx.fillText(LEVELS[levelIndex].title, 10, 32);
+
+    for (var i = 0; i < LIVES_MAX; i++) {
+      var lx = W - 10 - (LIVES_MAX - i) * 16;
+      ctx.beginPath();
+      ctx.arc(lx, 38, 5, 0, Math.PI * 2);
+      if (i < lives) { ctx.fillStyle = "#fff"; ctx.fill(); }
+      else { ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.stroke(); }
+    }
+  }
+
+  function centeredText(text, y, size) {
+    ctx.fillStyle = "#fff";
+    ctx.font = (size || 20) + "px 'Courier New', monospace";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(text, W / 2, y);
+  }
+
+  function drawTitleScreen() {
+    centeredText("BEACON RUN", H / 2 - 100, 32);
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+    ctx.strokeRect(W / 2 - 12, H / 2 - 74, 24, 24);
+    centeredText("A LITTLE SPARK. A DARK GRID. THREE BEACONS.", H / 2 - 10, 14);
+    centeredText("← → OR A/D TO RUN", H / 2 + 20, 14);
+    centeredText("UP / SPACE / W TO JUMP -- STOMP GLITCHES, GRAB SHARDS", H / 2 + 44, 14);
+    centeredText("PRESS ANY KEY OR CLICK TO START", H / 2 + 82, 13);
+    centeredText("BEST " + highScore, H / 2 + 112, 13);
+  }
+
+  function drawStoryScreen() {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
+    var startY = H / 2 - (storyLines.length - 1) * 14;
+    for (var i = 0; i < storyLines.length; i++) {
+      centeredText(storyLines[i], startY + i * 28, 16);
+    }
+    centeredText("PRESS ANY KEY OR CLICK TO CONTINUE", H - 40, 12);
+  }
+
+  function drawGameOverScreen() {
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(0, 0, W, H);
+    centeredText("GAME OVER", H / 2 - 30, 28);
+    centeredText("SCORE " + score, H / 2 + 6, 18);
+    centeredText("BEST " + highScore, H / 2 + 32, 14);
+    centeredText("PRESS ANY KEY OR CLICK TO RETRY", H / 2 + 70, 13);
+  }
+
+  function draw(t) {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
+
+    if (state === STATE_TITLE) { drawTitleScreen(); return; }
+    if (state === STATE_STORY) { drawStoryScreen(); return; }
+    if (state === STATE_WIN) {
+      centeredText("BEACON RUN COMPLETE", H / 2 - 60, 26);
+      for (var i = 0; i < ENDING_TEXT.length; i++) centeredText(ENDING_TEXT[i], H / 2 - 10 + i * 24, 15);
+      centeredText("FINAL SCORE " + score, H / 2 + 80, 16);
+      centeredText("PRESS ANY KEY OR CLICK FOR TITLE", H / 2 + 108, 12);
+      return;
+    }
+
+    drawGrid(t);
+    drawWorld();
+    drawHUD();
+
+    if (state === STATE_GAMEOVER) drawGameOverScreen();
+  }
+
+  // ---------------------------------------------------------------
+  // Loop
+  // ---------------------------------------------------------------
+  var lastTime = null;
+  function loop(ts) {
+    if (lastTime === null) lastTime = ts;
+    var dt = Math.min((ts - lastTime) / 1000, 0.05);
+    lastTime = ts;
+    update(dt);
+    draw(ts);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

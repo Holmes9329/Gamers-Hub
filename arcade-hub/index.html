@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARCADE</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; min-height: 100%;
+    background: #000; color: #fff;
+    font-family: 'Courier New', Courier, monospace;
+  }
+  body {
+    display: flex; flex-direction: column; align-items: center;
+    padding: 48px 20px 64px;
+  }
+  h1 {
+    font-size: 34px; letter-spacing: 4px; margin: 0 0 6px;
+    border: 2px solid #fff; padding: 14px 28px;
+  }
+  .tagline {
+    opacity: 0.65; font-size: 13px; letter-spacing: 1px; margin: 18px 0 40px;
+    text-align: center;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 24px;
+    width: 100%;
+    max-width: 900px;
+  }
+  .card {
+    border: 2px solid #fff;
+    padding: 22px;
+    display: flex; flex-direction: column; gap: 14px;
+    text-decoration: none; color: #fff;
+    transition: background 0.15s, color 0.15s;
+    min-height: 170px;
+  }
+  .card:hover { background: #fff; color: #000; }
+  .card:hover .icon svg * { stroke: #000 !important; fill: #000 !important; }
+  .icon { height: 44px; display: flex; align-items: center; }
+  .icon svg * { stroke: #fff; }
+  .card-title { font-size: 18px; letter-spacing: 1px; font-weight: bold; }
+  .card-desc { font-size: 12.5px; line-height: 1.5; opacity: 0.85; flex-grow: 1; }
+  .card-play {
+    font-size: 12px; letter-spacing: 2px; opacity: 0.8;
+    border-top: 1px solid currentColor; padding-top: 10px;
+  }
+  footer {
+    margin-top: 56px; font-size: 11px; opacity: 0.4; text-align: center;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+  <h1>ARCADE</h1>
+  <div class="tagline">THREE SMALL BLACK &amp; WHITE GAMES &mdash; CLICK ANY CARD TO PLAY</div>
+
+  <div class="grid">
+    <a class="card" href="../rocket-dodge/index.html">
+      <div class="icon">
+        <svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke-width="2">
+          <path d="M20 4 L28 24 L23 20 L23 30 L17 30 L17 20 L12 24 Z" />
+        </svg>
+      </div>
+      <div class="card-title">ROCKET // DODGE</div>
+      <div class="card-desc">
+        Steer left and right to dodge falling aliens while your rocket
+        auto-fires. Catch powerups, chase the high score.
+      </div>
+      <div class="card-play">PLAY &rarr;</div>
+    </a>
+
+    <a class="card" href="../blocks-and-bounce/index.html">
+      <div class="icon">
+        <svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke-width="2">
+          <rect x="6" y="8" width="10" height="6" />
+          <rect x="18" y="8" width="10" height="6" />
+          <circle cx="20" cy="26" r="3" fill="#fff" />
+          <rect x="12" y="32" width="16" height="4" fill="#fff" />
+        </svg>
+      </div>
+      <div class="card-title">BLOCKS // BOUNCE</div>
+      <div class="card-desc">
+        Classic brick breaker. Steer the paddle, break every block
+        across 3 layouts, and grab powerups along the way.
+      </div>
+      <div class="card-play">PLAY &rarr;</div>
+    </a>
+
+    <a class="card" href="../beacon-run/index.html">
+      <div class="icon">
+        <svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke-width="2">
+          <rect x="14" y="12" width="12" height="14" />
+          <line x1="20" y1="26" x2="20" y2="34" />
+          <line x1="14" y1="34" x2="26" y2="34" />
+        </svg>
+      </div>
+      <div class="card-title">BEACON RUN</div>
+      <div class="card-desc">
+        A small original platformer. Run, jump, stomp glitches, and
+        relight three dark Beacons across 3 Sectors.
+      </div>
+      <div class="card-play">PLAY &rarr;</div>
+    </a>
+  </div>
+
+  <footer>PERSONAL - ENGINEERING &mdash; LOCAL ARCADE HUB</footer>
+</body>
+</html>
