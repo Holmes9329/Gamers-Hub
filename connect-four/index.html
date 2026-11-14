@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CONNECT // FOUR</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #000;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Courier New', Courier, monospace;
+    overflow: hidden;
+  }
+  #wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  canvas {
+    background: #000;
+    border: 2px solid #fff;
+    width: min(92vw, 480px);
+    height: auto;
+    aspect-ratio: 480 / 640;
+    cursor: pointer;
+  }
+  #hint { color: #fff; font-size: 12px; letter-spacing: 1px; opacity: 0.6; text-align: center; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="480" height="640"></canvas>
+  <div id="hint">CLICK A COLUMN TO DROP YOUR PIECE &mdash; YOU ARE SOLID WHITE</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var W = canvas.width, H = canvas.height;
+
+  // ---------------------------------------------------------------
+  // Score (wins) persisted locally
+  // ---------------------------------------------------------------
+  var WINS_KEY = "connectFourWins";
+  var wins = { player: 0, ai: 0, draw: 0 };
+  try {
+    var saved = JSON.parse(localStorage.getItem(WINS_KEY));
+    if (saved) wins = saved;
+  } catch (e) { /* ignore */ }
+  function saveWins() {
+    try { localStorage.setItem(WINS_KEY, JSON.stringify(wins)); } catch (e) { /* ignore */ }
+  }
+
+  // ---------------------------------------------------------------
+  // Board
+  // ---------------------------------------------------------------
+  var COLS = 7, ROWS = 6;
+  var EMPTY = 0, PLAYER = 1, AI = 2;
+  var board = []; // board[row][col]
+
+  function freshBoard() {
+    var b = [];
+    for (var r = 0; r < ROWS; r++) {
+      var row = [];
+      for (var c = 0; c < COLS; c++) row.push(EMPTY);
+      b.push(row);
+    }
+    return b;
+  }
+
+  // ---------------------------------------------------------------
+  // Layout
+  // ---------------------------------------------------------------
+  var TOP_UI = 90, BOTTOM_MARGIN = 30, SIDE_MARGIN = 16;
+  var CELL = Math.min((W - SIDE_MARGIN * 2) / COLS, (H - TOP_UI - BOTTOM_MARGIN) / ROWS);
+  var BOARD_W = CELL * COLS, BOARD_H = CELL * ROWS;
+  var BOARD_X = (W - BOARD_W) / 2;
+  var BOARD_Y = TOP_UI + (H - TOP_UI - BOTTOM_MARGIN - BOARD_H) / 2;
+  var DISC_R = CELL * 0.38;
+
+  function cellCenter(r, c) {
+    return { x: BOARD_X + c * CELL + CELL / 2, y: BOARD_Y + r * CELL + CELL / 2 };
+  }
+
+  // ---------------------------------------------------------------
+  // State machine
+  // ---------------------------------------------------------------
+  var STATE_PLAYER_TURN = "player", STATE_AI_THINKING = "ai", STATE_GAMEOVER = "gameover";
+  var state = STATE_PLAYER_TURN;
+  var winner = null; // null | PLAYER | AI | "draw"
+  var winLine = null; // array of {r,c}
+  var aiTimer = 0;
+  var dropAnims = []; // {r,c,player,fromY,toY,t,dur} purely cosmetic drop-in animation
+
+  function resetGame() {
+    board = freshBoard();
+    state = STATE_PLAYER_TURN;
+    winner = null;
+    winLine = null;
+    dropAnims = [];
+  }
+  resetGame();
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // ---------------------------------------------------------------
+  // Core rules
+  // ---------------------------------------------------------------
+  function lowestEmptyRow(b, c) {
+    for (var r = ROWS - 1; r >= 0; r--) {
+      if (b[r][c] === EMPTY) return r;
+    }
+    return -1;
+  }
+
+  function columnFull(b, c) { return lowestEmptyRow(b, c) === -1; }
+  function boardFull(b) {
+    for (var c = 0; c < COLS; c++) if (!columnFull(b, c)) return false;
+    return true;
+  }
+
+  var DIRS = [
+    { dr: 0, dc: 1 },  // horizontal
+    { dr: 1, dc: 0 },  // vertical
+    { dr: 1, dc: 1 },  // diagonal down-right
+    { dr: 1, dc: -1 }  // diagonal down-left
+  ];
+
+  // Returns the winning line (array of 4 {r,c}) for `player` if the last
+  // move at (r,c) completed one, else null.
+  function findWinAt(b, r, c, player) {
+    for (var d = 0; d < DIRS.length; d++) {
+      var dr = DIRS[d].dr, dc = DIRS[d].dc;
+      var line = [{ r: r, c: c }];
+      // walk forward
+      var rr = r + dr, cc = c + dc;
+      while (rr >= 0 && rr < ROWS && cc >= 0 && cc < COLS && b[rr][cc] === player) {
+        line.push({ r: rr, c: cc }); rr += dr; cc += dc;
+      }
+      // walk backward
+      rr = r - dr; cc = c - dc;
+      while (rr >= 0 && rr < ROWS && cc >= 0 && cc < COLS && b[rr][cc] === player) {
+        line.unshift({ r: rr, c: cc }); rr -= dr; cc -= dc;
+      }
+      if (line.length >= 4) return line.slice(0, 4);
+    }
+    return null;
+  }
+
+  function dropPiece(b, c, player) {
+    var r = lowestEmptyRow(b, c);
+    if (r === -1) return -1;
+    b[r][c] = player;
+    return r;
+  }
+
+  // ---------------------------------------------------------------
+  // AI: minimax with alpha-beta pruning + standard window heuristic
+  // ---------------------------------------------------------------
+  var AI_DEPTH = 5;
+
+  function orderedColumns() {
+    // search center-out: better pruning, better play when heuristics tie
+    return [3, 2, 4, 1, 5, 0, 6];
+  }
+
+  function scoreWindow(cells, player) {
+    var opp = player === PLAYER ? AI : PLAYER;
+    var countP = 0, countO = 0, countE = 0;
+    for (var i = 0; i < cells.length; i++) {
+      if (cells[i] === player) countP++;
+      else if (cells[i] === opp) countO++;
+      else countE++;
+    }
+    if (countP === 4) return 100000;
+    if (countO === 4) return -100000;
+    var score = 0;
+    if (countP === 3 && countE === 1) score += 50;
+    else if (countP === 2 && countE === 2) score += 10;
+    if (countO === 3 && countE === 1) score -= 60; // weight defense slightly higher
+    else if (countO === 2 && countE === 2) score -= 8;
+    return score;
+  }
+
+  function evaluateBoard(b, player) {
+    var total = 0;
+    var c, r;
+    // center column preference
+    var centerCol = Math.floor(COLS / 2);
+    for (r = 0; r < ROWS; r++) {
+      if (b[r][centerCol] === player) total += 6;
+      else if (b[r][centerCol] !== EMPTY) total -= 3;
+    }
+    // horizontal
+    for (r = 0; r < ROWS; r++) {
+      for (c = 0; c <= COLS - 4; c++) {
+        total += scoreWindow([b[r][c], b[r][c+1], b[r][c+2], b[r][c+3]], player);
+      }
+    }
+    // vertical
+    for (c = 0; c < COLS; c++) {
+      for (r = 0; r <= ROWS - 4; r++) {
+        total += scoreWindow([b[r][c], b[r+1][c], b[r+2][c], b[r+3][c]], player);
+      }
+    }
+    // diagonal down-right
+    for (r = 0; r <= ROWS - 4; r++) {
+      for (c = 0; c <= COLS - 4; c++) {
+        total += scoreWindow([b[r][c], b[r+1][c+1], b[r+2][c+2], b[r+3][c+3]], player);
+      }
+    }
+    // diagonal down-left
+    for (r = 0; r <= ROWS - 4; r++) {
+      for (c = 3; c < COLS; c++) {
+        total += scoreWindow([b[r][c], b[r+1][c-1], b[r+2][c-2], b[r+3][c-3]], player);
+      }
+    }
+    return total;
+  }
+
+  function anyWinner(b) {
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        if (b[r][c] === EMPTY) continue;
+        var win = findWinAt(b, r, c, b[r][c]);
+        if (win) return b[r][c];
+      }
+    }
+    return null;
+  }
+
+  function minimax(b, depth, alpha, beta, maximizing) {
+    var winnerNow = anyWinner(b);
+    if (winnerNow === AI) return { score: 1000000 + depth };
+    if (winnerNow === PLAYER) return { score: -1000000 - depth };
+    if (boardFull(b)) return { score: 0 };
+    if (depth === 0) return { score: evaluateBoard(b, AI) };
+
+    var cols = orderedColumns().filter(function (c) { return !columnFull(b, c); });
+    var bestCol = cols.length ? cols[0] : null;
+
+    if (maximizing) {
+      var best = -Infinity;
+      for (var i = 0; i < cols.length; i++) {
+        var c = cols[i];
+        var r = dropPiece(b, c, AI);
+        var result = minimax(b, depth - 1, alpha, beta, false);
+        b[r][c] = EMPTY;
+        if (result.score > best) { best = result.score; bestCol = c; }
+        alpha = Math.max(alpha, best);
+        if (alpha >= beta) break;
+      }
+      return { score: best, col: bestCol };
+    } else {
+      var worst = Infinity;
+      for (var j = 0; j < cols.length; j++) {
+        var c2 = cols[j];
+        var r2 = dropPiece(b, c2, PLAYER);
+        var result2 = minimax(b, depth - 1, alpha, beta, true);
+        b[r2][c2] = EMPTY;
+        if (result2.score < worst) { worst = result2.score; bestCol = c2; }
+        beta = Math.min(beta, worst);
+        if (alpha >= beta) break;
+      }
+      return { score: worst, col: bestCol };
+    }
+  }
+
+  function bestAiMove(b) {
+    var result = minimax(b, AI_DEPTH, -Infinity, Infinity, true);
+    if (result.col === undefined || result.col === null || columnFull(b, result.col)) {
+      var cols = orderedColumns().filter(function (c) { return !columnFull(b, c); });
+      return cols.length ? cols[0] : -1;
+    }
+    return result.col;
+  }
+
+  // ---------------------------------------------------------------
+  // Moves
+  // ---------------------------------------------------------------
+  function addDropAnim(r, c, player) {
+    var center = cellCenter(r, c);
+    dropAnims.push({ r: r, c: c, player: player, y: BOARD_Y - CELL, targetY: center.y, t: 0, dur: 0.22 + r * 0.03 });
+  }
+
+  function playerMove(c) {
+    if (state !== STATE_PLAYER_TURN) return;
+    if (columnFull(board, c)) return;
+    var r = dropPiece(board, c, PLAYER);
+    addDropAnim(r, c, PLAYER);
+    var win = findWinAt(board, r, c, PLAYER);
+    if (win) {
+      winner = PLAYER; winLine = win; state = STATE_GAMEOVER;
+      wins.player++; saveWins();
+      return;
+    }
+    if (boardFull(board)) {
+      winner = "draw"; state = STATE_GAMEOVER; wins.draw++; saveWins();
+      return;
+    }
+    state = STATE_AI_THINKING;
+    aiTimer = 0.45;
+  }
+
+  function aiMove() {
+    var c = bestAiMove(board);
+    if (c === -1) { winner = "draw"; state = STATE_GAMEOVER; wins.draw++; saveWins(); return; }
+    var r = dropPiece(board, c, AI);
+    addDropAnim(r, c, AI);
+    var win = findWinAt(board, r, c, AI);
+    if (win) {
+      winner = AI; winLine = win; state = STATE_GAMEOVER;
+      wins.ai++; saveWins();
+      return;
+    }
+    if (boardFull(board)) {
+      winner = "draw"; state = STATE_GAMEOVER; wins.draw++; saveWins();
+      return;
+    }
+    state = STATE_PLAYER_TURN;
+  }
+
+  // ---------------------------------------------------------------
+  // Input
+  // ---------------------------------------------------------------
+  function colFromX(x) {
+    var c = Math.floor((x - BOARD_X) / CELL);
+    return clamp(c, 0, COLS - 1);
+  }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function pointerToCanvas(clientX, clientY) {
+    var rect = canvas.getBoundingClientRect();
+    var scaleX = canvas.width / rect.width;
+    var scaleY = canvas.height / rect.height;
+    return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
+  }
+
+  canvas.addEventListener("mousedown", function (e) {
+    var p = pointerToCanvas(e.clientX, e.clientY);
+    handleClick(p.x, p.y);
+  });
+  canvas.addEventListener("touchstart", function (e) {
+    e.preventDefault();
+    var t = e.touches[0];
+    var p = pointerToCanvas(t.clientX, t.clientY);
+    handleClick(p.x, p.y);
+  }, { passive: false });
+
+  var hoverCol = 3;
+  canvas.addEventListener("mousemove", function (e) {
+    var p = pointerToCanvas(e.clientX, e.clientY);
+    if (p.y >= BOARD_Y - 40) hoverCol = colFromX(p.x);
+  });
+
+  function handleClick(x, y) {
+    if (state === STATE_GAMEOVER) { resetGame(); return; }
+    if (state !== STATE_PLAYER_TURN) return;
+    if (y < BOARD_Y - 40) return;
+    playerMove(colFromX(x));
+  }
+
+  window.addEventListener("keydown", function (e) {
+    if (state === STATE_GAMEOVER && (e.code === "Space" || e.code === "Enter")) { resetGame(); return; }
+    if (state !== STATE_PLAYER_TURN) return;
+    if (e.code === "ArrowLeft") { hoverCol = clamp(hoverCol - 1, 0, COLS - 1); }
+    if (e.code === "ArrowRight") { hoverCol = clamp(hoverCol + 1, 0, COLS - 1); }
+    if (e.code === "Space" || e.code === "Enter" || e.code === "ArrowDown") { playerMove(hoverCol); }
+  });
+
+  // ---------------------------------------------------------------
+  // Update
+  // ---------------------------------------------------------------
+  function update(dt) {
+    for (var i = dropAnims.length - 1; i >= 0; i--) {
+      var a = dropAnims[i];
+      a.t += dt;
+      if (a.t >= a.dur) dropAnims.splice(i, 1);
+    }
+    if (state === STATE_AI_THINKING) {
+      aiTimer -= dt;
+      if (aiTimer <= 0) aiMove();
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Draw
+  // ---------------------------------------------------------------
+  function easeOutBounce(x) {
+    var n1 = 7.5625, d1 = 2.75;
+    if (x < 1 / d1) return n1 * x * x;
+    if (x < 2 / d1) { x -= 1.5 / d1; return n1 * x * x + 0.75; }
+    if (x < 2.5 / d1) { x -= 2.25 / d1; return n1 * x * x + 0.9375; }
+    x -= 2.625 / d1; return n1 * x * x + 0.984375;
+  }
+
+  function discY(r, c) {
+    for (var i = 0; i < dropAnims.length; i++) {
+      var a = dropAnims[i];
+      if (a.r === r && a.c === c) {
+        var t = clamp(a.t / a.dur, 0, 1);
+        return a.y + (a.targetY - a.y) * easeOutBounce(t);
+      }
+    }
+    return cellCenter(r, c).y;
+  }
+
+  function drawDisc(x, y, player) {
+    ctx.beginPath();
+    ctx.arc(x, y, DISC_R, 0, Math.PI * 2);
+    if (player === PLAYER) {
+      ctx.fillStyle = "#fff";
+      ctx.fill();
+    } else {
+      ctx.save();
+      ctx.clip();
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(x - DISC_R, y - DISC_R, DISC_R * 2, DISC_R * 2);
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 3;
+      for (var sx = x - DISC_R * 2; sx < x + DISC_R * 2; sx += 7) {
+        ctx.beginPath();
+        ctx.moveTo(sx, y + DISC_R * 2);
+        ctx.lineTo(sx + DISC_R * 2, y - DISC_R * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(x, y, DISC_R, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  function drawBoard() {
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H);
+
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        var center = cellCenter(r, c);
+        if (board[r][c] === EMPTY) {
+          ctx.strokeStyle = "rgba(255,255,255,0.22)";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(center.x, center.y, DISC_R, 0, Math.PI * 2);
+          ctx.stroke();
+        } else {
+          drawDisc(center.x, discY(r, c), board[r][c]);
+        }
+      }
+    }
+
+    if (winLine) {
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      var p0 = cellCenter(winLine[0].r, winLine[0].c);
+      var p3 = cellCenter(winLine[3].r, winLine[3].c);
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p3.x, p3.y);
+      ctx.stroke();
+    }
+  }
+
+  function drawHoverMarker() {
+    if (state !== STATE_PLAYER_TURN) return;
+    var r = lowestEmptyRow(board, hoverCol);
+    if (r === -1) return;
+    var center = cellCenter(0, hoverCol);
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.beginPath();
+    ctx.arc(center.x, BOARD_Y - 20, DISC_R * 0.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawHUD() {
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 18px 'Courier New', monospace";
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    ctx.fillText("CONNECT // FOUR", W / 2, 14);
+
+    ctx.font = "12px 'Courier New', monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("YOU " + wins.player, 14, 44);
+    ctx.textAlign = "center";
+    ctx.fillText("DRAWS " + wins.draw, W / 2, 44);
+    ctx.textAlign = "right";
+    ctx.fillText("AI " + wins.ai, W - 14, 44);
+
+    ctx.font = "13px 'Courier New', monospace";
+    ctx.textAlign = "center";
+    var statusText = "YOUR TURN";
+    if (state === STATE_AI_THINKING) statusText = "AI IS THINKING...";
+    if (state === STATE_GAMEOVER) {
+      statusText = winner === "draw" ? "DRAW" : (winner === PLAYER ? "YOU WIN" : "AI WINS");
+    }
+    ctx.fillText(statusText, W / 2, 66);
+  }
+
+  function drawGameOverBanner() {
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillRect(0, H - 90, W, 90);
+    ctx.fillStyle = "#fff";
+    ctx.font = "14px 'Courier New', monospace";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("CLICK, SPACE, OR ENTER TO PLAY AGAIN", W / 2, H - 45);
+  }
+
+  function draw() {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
+    drawHUD();
+    drawHoverMarker();
+    drawBoard();
+    if (state === STATE_GAMEOVER) drawGameOverBanner();
+  }
+
+  // ---------------------------------------------------------------
+  // Loop
+  // ---------------------------------------------------------------
+  var lastTime = null;
+  function loop(ts) {
+    if (lastTime === null) lastTime = ts;
+    var dt = Math.min((ts - lastTime) / 1000, 0.05);
+    lastTime = ts;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

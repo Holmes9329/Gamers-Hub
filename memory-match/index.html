@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MEMORY // MATCH</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #000;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Courier New', Courier, monospace;
+    overflow: hidden;
+  }
+  #wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  canvas {
+    background: #000;
+    border: 2px solid #fff;
+    width: min(92vw, 480px);
+    height: auto;
+    aspect-ratio: 480 / 640;
+    cursor: pointer;
+  }
+  #hint { color: #fff; font-size: 12px; letter-spacing: 1px; opacity: 0.6; text-align: center; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="480" height="640"></canvas>
+  <div id="hint">CLICK TWO CARDS TO FIND A MATCHING PAIR</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var W = canvas.width, H = canvas.height;
+
+  // ---------------------------------------------------------------
+  // High score
+  // ---------------------------------------------------------------
+  var HIGH_SCORE_KEY = "memoryMatchHighScore";
+  var highScore = 0;
+  try { highScore = parseInt(localStorage.getItem(HIGH_SCORE_KEY), 10) || 0; } catch (e) { highScore = 0; }
+  function saveHighScore(s) {
+    if (s > highScore) {
+      highScore = s;
+      try { localStorage.setItem(HIGH_SCORE_KEY, String(highScore)); } catch (e) { /* ignore */ }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Rounds: increasing grid size / pair count
+  // ---------------------------------------------------------------
+  var ROUNDS = [
+    { cols: 4, rows: 3 }, // 6 pairs
+    { cols: 4, rows: 4 }, // 8 pairs
+    { cols: 5, rows: 4 }  // 10 pairs
+  ];
+
+  // ---------------------------------------------------------------
+  // Monochrome symbol glyphs -- drawn, not imaged, so the whole game
+  // stays a single dependency-free file.
+  // ---------------------------------------------------------------
+  var SYMBOLS = [
+    function (x, y, s) { ctx.beginPath(); ctx.arc(x, y, s * 0.38, 0, Math.PI * 2); ctx.stroke(); },
+    function (x, y, s) { ctx.strokeRect(x - s * 0.32, y - s * 0.32, s * 0.64, s * 0.64); },
+    function (x, y, s) { // triangle
+      ctx.beginPath();
+      ctx.moveTo(x, y - s * 0.38); ctx.lineTo(x + s * 0.34, y + s * 0.28); ctx.lineTo(x - s * 0.34, y + s * 0.28);
+      ctx.closePath(); ctx.stroke();
+    },
+    function (x, y, s) { // diamond
+      ctx.beginPath();
+      ctx.moveTo(x, y - s * 0.38); ctx.lineTo(x + s * 0.34, y); ctx.lineTo(x, y + s * 0.38); ctx.lineTo(x - s * 0.34, y);
+      ctx.closePath(); ctx.stroke();
+    },
+    function (x, y, s) { // plus
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.34, y); ctx.lineTo(x + s * 0.34, y);
+      ctx.moveTo(x, y - s * 0.34); ctx.lineTo(x, y + s * 0.34);
+      ctx.stroke();
+    },
+    function (x, y, s) { // X
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.3, y - s * 0.3); ctx.lineTo(x + s * 0.3, y + s * 0.3);
+      ctx.moveTo(x + s * 0.3, y - s * 0.3); ctx.lineTo(x - s * 0.3, y + s * 0.3);
+      ctx.stroke();
+    },
+    function (x, y, s) { // 5-point star
+      ctx.beginPath();
+      for (var i = 0; i < 5; i++) {
+        var ang = -Math.PI / 2 + i * (Math.PI * 2 / 5);
+        var ox = x + Math.cos(ang) * s * 0.36, oy = y + Math.sin(ang) * s * 0.36;
+        if (i === 0) ctx.moveTo(ox, oy); else ctx.lineTo(ox, oy);
+        var ang2 = ang + Math.PI / 5;
+        var ix = x + Math.cos(ang2) * s * 0.15, iy = y + Math.sin(ang2) * s * 0.15;
+        ctx.lineTo(ix, iy);
+      }
+      ctx.closePath(); ctx.stroke();
+    },
+    function (x, y, s) { // zigzag
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.32, y - s * 0.2);
+      ctx.lineTo(x - s * 0.1, y + s * 0.2);
+      ctx.lineTo(x + s * 0.1, y - s * 0.2);
+      ctx.lineTo(x + s * 0.32, y + s * 0.2);
+      ctx.stroke();
+    },
+    function (x, y, s) { // half-moon
+      ctx.beginPath();
+      ctx.arc(x, y, s * 0.36, Math.PI * 0.3, Math.PI * 1.7);
+      ctx.stroke();
+    },
+    function (x, y, s) { // double ring
+      ctx.beginPath(); ctx.arc(x, y, s * 0.38, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, s * 0.18, 0, Math.PI * 2); ctx.stroke();
+    }
+  ];
+
+  // ---------------------------------------------------------------
+  // State machine
+  // ---------------------------------------------------------------
+  var STATE_PLAYING = "playing", STATE_ROUND_CLEAR = "roundclear", STATE_WIN = "win";
+  var state = STATE_PLAYING;
+  var score = 0;
+  var roundIndex = 0;
+  var stateTimer = 0;
+
+  var cards = []; // {col,row,symbol,state:'hidden'|'revealed'|'matched'}
+  var flipped = []; // indices into cards, length 0-2
+  var lockTimer = 0;
+  var movesThisRound = 0;
+  var matchedThisRound = 0;
+  var totalPairsThisRound = 0;
+
+  var layout = null; // {cell, offsetX, offsetY, cols, rows}
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function shuffle(arr) {
+    for (var i = arr.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+    }
+    return arr;
+  }
+
+  // ---------------------------------------------------------------
+  // Layout
+  // ---------------------------------------------------------------
+  var GRID_TOP = 92, GRID_BOTTOM = 30, GRID_SIDE = 18, CARD_GAP = 10;
+
+  function computeLayout(cols, rows) {
+    var availW = W - GRID_SIDE * 2;
+    var availH = H - GRID_TOP - GRID_BOTTOM;
+    var cellW = (availW - (cols - 1) * CARD_GAP) / cols;
+    var cellH = (availH - (rows - 1) * CARD_GAP) / rows;
+    var cell = Math.floor(Math.min(cellW, cellH));
+    var gridW = cols * cell + (cols - 1) * CARD_GAP;
+    var gridH = rows * cell + (rows - 1) * CARD_GAP;
+    return {
+      cell: cell,
+      offsetX: (W - gridW) / 2,
+      offsetY: GRID_TOP + (availH - gridH) / 2,
+      cols: cols, rows: rows
+    };
+  }
+
+  function cardRect(card) {
+    var x = layout.offsetX + card.col * (layout.cell + CARD_GAP);
+    var y = layout.offsetY + card.row * (layout.cell + CARD_GAP);
+    return { x: x, y: y, w: layout.cell, h: layout.cell };
+  }
+
+  // ---------------------------------------------------------------
+  // Round setup
+  // ---------------------------------------------------------------
+  function startRound(idx) {
+    roundIndex = idx;
+    var cfg = ROUNDS[idx];
+    layout = computeLayout(cfg.cols, cfg.rows);
+    var totalCards = cfg.cols * cfg.rows;
+    totalPairsThisRound = totalCards / 2;
+    movesThisRound = 0;
+    matchedThisRound = 0;
+
+    var symbolPool = shuffle(SYMBOLS.map(function (_, i) { return i; })).slice(0, totalPairsThisRound);
+    var deck = [];
+    for (var i = 0; i < symbolPool.length; i++) { deck.push(symbolPool[i]); deck.push(symbolPool[i]); }
+    shuffle(deck);
+
+    cards = [];
+    var k = 0;
+    for (var r = 0; r < cfg.rows; r++) {
+      for (var c = 0; c < cfg.cols; c++) {
+        cards.push({ col: c, row: r, symbol: deck[k++], state: "hidden" });
+      }
+    }
+    flipped = [];
+    lockTimer = 0;
+    state = STATE_PLAYING;
+  }
+
+  function resetGame() {
+    score = 0;
+    startRound(0);
+  }
+
+  // ---------------------------------------------------------------
+  // Input
+  // ---------------------------------------------------------------
+  function pointerToCanvas(clientX, clientY) {
+    var rect = canvas.getBoundingClientRect();
+    var scaleX = canvas.width / rect.width;
+    var scaleY = canvas.height / rect.height;
+    return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
+  }
+
+  function cardAt(x, y) {
+    for (var i = 0; i < cards.length; i++) {
+      var rect = cardRect(cards[i]);
+      if (x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) return i;
+    }
+    return -1;
+  }
+
+  function handleClick(x, y) {
+    if (state === STATE_ROUND_CLEAR) {
+      if (stateTimer <= 0) startRound(roundIndex + 1);
+      return;
+    }
+    if (state === STATE_WIN) {
+      if (stateTimer <= 0) resetGame();
+      return;
+    }
+    if (state !== STATE_PLAYING) return;
+    if (lockTimer > 0 || flipped.length >= 2) return;
+
+    var idx = cardAt(x, y);
+    if (idx === -1) return;
+    var card = cards[idx];
+    if (card.state !== "hidden") return;
+
+    card.state = "revealed";
+    flipped.push(idx);
+
+    if (flipped.length === 2) {
+      movesThisRound++;
+      var a = cards[flipped[0]], b = cards[flipped[1]];
+      if (a.symbol === b.symbol) {
+        a.state = "matched"; b.state = "matched";
+        matchedThisRound++;
+        score += 20;
+        flipped = [];
+        if (matchedThisRound >= totalPairsThisRound) {
+          var parMoves = totalPairsThisRound * 2; // a reasonable "good" move count
+          var bonus = Math.max(0, (parMoves - movesThisRound) * 15);
+          score += bonus;
+          if (roundIndex >= ROUNDS.length - 1) {
+            state = STATE_WIN;
+            saveHighScore(score);
+          } else {
+            state = STATE_ROUND_CLEAR;
+          }
+          stateTimer = 0.6;
+        }
+      } else {
+        lockTimer = 0.7;
+      }
+    }
+  }
+
+  canvas.addEventListener("mousedown", function (e) {
+    var p = pointerToCanvas(e.clientX, e.clientY);
+    handleClick(p.x, p.y);
+  });
+  canvas.addEventListener("touchstart", function (e) {
+    e.preventDefault();
+    var t = e.touches[0];
+    var p = pointerToCanvas(t.clientX, t.clientY);
+    handleClick(p.x, p.y);
+  }, { passive: false });
+
+  window.addEventListener("keydown", function (e) {
+    if ((e.code === "Space" || e.code === "Enter") && state === STATE_ROUND_CLEAR && stateTimer <= 0) { startRound(roundIndex + 1); }
+    if ((e.code === "Space" || e.code === "Enter") && state === STATE_WIN && stateTimer <= 0) { resetGame(); }
+  });
+
+  // ---------------------------------------------------------------
+  // Update
+  // ---------------------------------------------------------------
+  function update(dt) {
+    if (state === STATE_ROUND_CLEAR || state === STATE_WIN) {
+      if (stateTimer > 0) stateTimer -= dt;
+      return;
+    }
+    if (lockTimer > 0) {
+      lockTimer -= dt;
+      if (lockTimer <= 0) {
+        for (var i = 0; i < flipped.length; i++) {
+          var c = cards[flipped[i]];
+          if (c.state === "revealed") c.state = "hidden";
+        }
+        flipped = [];
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Draw
+  // ---------------------------------------------------------------
+  function drawCard(card) {
+    var rect = cardRect(card);
+    var cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2;
+
+    if (card.state === "hidden") {
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(rect.x + rect.w * 0.22, rect.y + rect.h * 0.22, rect.w * 0.56, rect.h * 0.56);
+      return;
+    }
+
+    ctx.strokeStyle = card.state === "matched" ? "rgba(255,255,255,0.45)" : "#fff";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+    ctx.save();
+    ctx.globalAlpha = card.state === "matched" ? 0.45 : 1;
+    SYMBOLS[card.symbol](cx, cy, rect.w);
+    ctx.restore();
+  }
+
+  function drawHUD() {
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 17px 'Courier New', monospace";
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    ctx.fillText("MEMORY // MATCH", W / 2, 12);
+
+    ctx.font = "12px 'Courier New', monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("SCORE " + score, 14, 42);
+    ctx.textAlign = "center";
+    ctx.fillText("ROUND " + (roundIndex + 1) + "/" + ROUNDS.length, W / 2, 42);
+    ctx.textAlign = "right";
+    ctx.fillText("BEST " + Math.max(highScore, score), W - 14, 42);
+
+    ctx.textAlign = "center";
+    ctx.fillText("PAIRS " + matchedThisRound + "/" + totalPairsThisRound + "   MOVES " + movesThisRound, W / 2, 64);
+  }
+
+  function centeredText(text, y, size) {
+    ctx.fillStyle = "#fff";
+    ctx.font = (size || 20) + "px 'Courier New', monospace";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(text, W / 2, y);
+  }
+
+  function drawRoundClearScreen() {
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(0, 0, W, H);
+    centeredText("ROUND " + (roundIndex + 1) + " CLEAR", H / 2 - 20, 24);
+    centeredText("SCORE " + score, H / 2 + 14, 16);
+    if (stateTimer <= 0) centeredText("CLICK OR PRESS SPACE FOR NEXT ROUND", H / 2 + 50, 13);
+  }
+
+  function drawWinScreen() {
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillRect(0, 0, W, H);
+    centeredText("ALL ROUNDS CLEARED", H / 2 - 30, 24);
+    centeredText("FINAL SCORE " + score, H / 2 + 6, 18);
+    centeredText("BEST " + highScore, H / 2 + 32, 14);
+    if (stateTimer <= 0) centeredText("CLICK OR PRESS SPACE TO PLAY AGAIN", H / 2 + 70, 13);
+  }
+
+  function draw() {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
+    drawHUD();
+    for (var i = 0; i < cards.length; i++) drawCard(cards[i]);
+    if (state === STATE_ROUND_CLEAR) drawRoundClearScreen();
+    if (state === STATE_WIN) drawWinScreen();
+  }
+
+  // ---------------------------------------------------------------
+  // Loop
+  // ---------------------------------------------------------------
+  startRound(0);
+  var lastTime = null;
+  function loop(ts) {
+    if (lastTime === null) lastTime = ts;
+    var dt = Math.min((ts - lastTime) / 1000, 0.05);
+    lastTime = ts;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
